@@ -5,31 +5,56 @@ import android.content.Intent
 import android.os.Bundle
 import android.speech.RecognizerIntent
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.compose.foundation.layout.*
-import androidx.compose.material3.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Mic
-import androidx.compose.runtime.*
+import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import io.ktor.client.HttpClient
+import io.ktor.client.engine.okhttp.OkHttp
+import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
+import io.ktor.client.request.post
+import io.ktor.client.request.setBody
+import io.ktor.client.statement.HttpResponse
+import io.ktor.client.statement.bodyAsText
+import io.ktor.serialization.kotlinx.json.json
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.addJsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
 import java.util.Locale
-import io.ktor.client.*
-import io.ktor.client.engine.okhttp.*
-import io.ktor.client.request.*
-import io.ktor.client.statement.*
-import io.ktor.client.plugins.contentnegotiation.*
-import io.ktor.serialization.kotlinx.json.*
-import kotlinx.serialization.*
-import kotlinx.serialization.json.*
-
-@Serializable
-data class OllamaRequest(val model: String, val prompt: String)
 
 val client = HttpClient(OkHttp) {
     install(ContentNegotiation) {
@@ -112,8 +137,8 @@ fun AppContent() {
                 onClick = {
                     isLoading = true
                     response = ""
-                    fetchOllamaResponse(prompt) {
-                        response = it
+                    fetchOllamaResponse(prompt) { result ->
+                        response = result
                         isLoading = false
                     }
                 },
@@ -140,25 +165,35 @@ fun AppContent() {
 fun fetchOllamaResponse(prompt: String, onResult: (String) -> Unit) {
     CoroutineScope(Dispatchers.IO).launch {
         try {
-            val request = OllamaRequest(model = "llama3", prompt = prompt)
-            val response: HttpResponse = client.post("http://192.168.31.43:11434/api/generate") {
-                setBody(Json.encodeToString(request))
-                headers.append("Content-Type", "application/json")
-            }
-            val responseBody = response.bodyAsText()
-            // Ollama streams responses, so parse accordingly
-            val lines = responseBody.lines()
-            val answer = buildString {
-                for (line in lines) {
-                    if (line.isNotBlank()) {
-                        val obj = Json.decodeFromString<JsonObject>(line)
-                        append(obj["response"]?.jsonPrimitive?.content ?: "")
+            val request = buildJsonObject {
+                put("model", "gemma3") // Change model if needed
+                putJsonArray("messages") {
+                    addJsonObject {
+                        put("role", "user")
+                        put("content", prompt)
                     }
                 }
             }
-            onResult(answer)
+            val response: HttpResponse = client.post("http://192.168.31.43:11434/api/chat") {
+                setBody(Json.encodeToString(JsonObject.serializer(), request))
+                headers.append("Content-Type", "application/json")
+            }
+            val responseBody = response.bodyAsText()
+            // Ollama streams responses, so parse each line
+            val lines = responseBody.trim().lines()
+            val answer = StringBuilder()
+            for (line in lines) {
+                if (line.isNotBlank()) {
+                    val obj = Json.decodeFromString<JsonObject>(line)
+                    val messageObj = obj["message"]?.jsonObject
+                    val content = messageObj?.get("content")?.jsonPrimitive?.contentOrNull
+                    if (!content.isNullOrBlank()) answer.append(content)
+                }
+            }
+            onResult(answer.toString().ifBlank { "No response" })
         } catch (e: Exception) {
             onResult("Error: ${e.message}")
         }
     }
 }
+
