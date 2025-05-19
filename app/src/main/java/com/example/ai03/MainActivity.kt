@@ -93,7 +93,7 @@ fun AppContent() {
 
     Scaffold(
         topBar = {
-            TopAppBar(title = { Text("Ollama Voice Chat") })
+            TopAppBar(title = { Text("Automation Agent") })
         }
     ) { padding ->
         Column(
