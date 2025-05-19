@@ -1,38 +1,30 @@
+@file:Suppress("DEPRECATION")
+
 package com.example.ai03
 
 import android.app.Activity
+import android.content.Context
 import android.content.Intent
+import android.net.nsd.NsdManager
+import android.net.nsd.NsdServiceInfo
 import android.os.Bundle
 import android.speech.RecognizerIntent
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Mic
-import androidx.compose.material3.Button
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
@@ -45,16 +37,13 @@ import io.ktor.serialization.kotlinx.json.json
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.addJsonObject
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
-import kotlinx.serialization.json.put
-import kotlinx.serialization.json.putJsonArray
+import kotlinx.serialization.json.*
 import java.util.Locale
+
+// ---- FIX: Move enum to top-level ----
+enum class ConnectionStatus {
+    NOT_CONNECTED, SCANNING, CONNECTED
+}
 
 val client = HttpClient(OkHttp) {
     install(ContentNegotiation) {
@@ -76,9 +65,17 @@ class MainActivity : ComponentActivity() {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AppContent() {
+    val context = LocalContext.current
+
     var prompt by remember { mutableStateOf("") }
     var response by remember { mutableStateOf("") }
     var isLoading by remember { mutableStateOf(false) }
+    var isScanning by remember { mutableStateOf(false) }
+    var discoveredHost by remember { mutableStateOf<String?>(null) }
+    var discoveredPort by remember { mutableStateOf<Int?>(null) }
+    var scanError by remember { mutableStateOf<String?>(null) }
+    var connectionStatus by remember { mutableStateOf(ConnectionStatus.NOT_CONNECTED) }
+    var lastError by remember { mutableStateOf<String?>(null) }
 
     val voiceLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
@@ -88,6 +85,96 @@ fun AppContent() {
             if (!matches.isNullOrEmpty()) {
                 prompt = matches[0]
             }
+        }
+    }
+
+    // ---- NSD Discovery logic ----
+    fun startDiscovery() {
+        isScanning = true
+        scanError = null
+        discoveredHost = null
+        discoveredPort = null
+        connectionStatus = ConnectionStatus.SCANNING
+
+        val nsdManager = context.getSystemService(Context.NSD_SERVICE) as NsdManager
+        val serviceType = "_ollama._tcp." // Must match the type advertised by your PC
+
+        val discoveryListener = object : NsdManager.DiscoveryListener {
+            override fun onDiscoveryStarted(regType: String) {
+                Log.d("NSD", "Service discovery started")
+            }
+
+            override fun onServiceFound(service: NsdServiceInfo) {
+                Log.d("NSD", "Service discovery success: $service")
+                if (service.serviceType == serviceType) {
+                    nsdManager.resolveService(service, object : NsdManager.ResolveListener {
+                        override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
+                            isScanning = false
+                            scanError = "Resolve failed: $errorCode"
+                            connectionStatus = ConnectionStatus.NOT_CONNECTED
+                        }
+
+                        override fun onServiceResolved(serviceInfo: NsdServiceInfo) {
+                            Log.d("NSD", "Service resolved: $serviceInfo")
+                            discoveredHost = serviceInfo.host.hostAddress
+                            discoveredPort = serviceInfo.port
+                            isScanning = false
+                            scanError = null
+                            connectionStatus = ConnectionStatus.CONNECTED
+                        }
+                    })
+                }
+            }
+
+            override fun onServiceLost(service: NsdServiceInfo) {
+                Log.e("NSD", "service lost: $service")
+                isScanning = false
+                scanError = "Service lost"
+                connectionStatus = ConnectionStatus.NOT_CONNECTED
+                discoveredHost = null
+                discoveredPort = null
+            }
+
+            override fun onDiscoveryStopped(serviceType: String) {
+                Log.i("NSD", "Discovery stopped: $serviceType")
+                isScanning = false
+                if (discoveredHost == null) {
+                    connectionStatus = ConnectionStatus.NOT_CONNECTED
+                }
+            }
+
+            override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) {
+                Log.e("NSD", "Discovery failed: Error code:$errorCode")
+                isScanning = false
+                scanError = "Discovery failed: $errorCode"
+                connectionStatus = ConnectionStatus.NOT_CONNECTED
+            }
+
+            override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) {
+                Log.e("NSD", "Stop Discovery failed: Error code:$errorCode")
+                isScanning = false
+            }
+        }
+
+        nsdManager.discoverServices(serviceType, NsdManager.PROTOCOL_DNS_SD, discoveryListener)
+    }
+
+    // ---- UI for Connection Status ----
+    @Composable
+    fun ConnectionStatusBar() {
+        val (text, color) = when (connectionStatus) {
+            ConnectionStatus.CONNECTED -> "🟢 Connected to $discoveredHost:$discoveredPort" to Color(0xFF4CAF50)
+            ConnectionStatus.SCANNING -> "🟡 Scanning for Ollama server..." to Color(0xFFFFC107)
+            ConnectionStatus.NOT_CONNECTED -> "🔴 Not Connected" to Color(0xFFF44336)
+        }
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(color, shape = RoundedCornerShape(8.dp))
+                .padding(12.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(text, color = Color.White)
         }
     }
 
@@ -103,6 +190,36 @@ fun AppContent() {
                 .fillMaxSize(),
             verticalArrangement = Arrangement.Top
         ) {
+            // Connection Status Bar
+            ConnectionStatusBar()
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Button(
+                onClick = { startDiscovery() },
+                enabled = !isScanning,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(if (isScanning) "Scanning..." else "Scan for Ollama Server")
+            }
+
+            if (scanError != null) {
+                Text(
+                    text = scanError!!,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(top = 8.dp)
+                )
+                // Retry Button
+                Button(
+                    onClick = { startDiscovery() },
+                    modifier = Modifier.padding(top = 4.dp)
+                ) {
+                    Text("Retry")
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
             OutlinedTextField(
                 value = prompt,
                 onValueChange = { prompt = it },
@@ -128,21 +245,33 @@ fun AppContent() {
                     }) {
                         Icon(Icons.Filled.Mic, contentDescription = "Voice input")
                     }
-                }
+                },
+                enabled = connectionStatus == ConnectionStatus.CONNECTED
             )
 
             Spacer(modifier = Modifier.height(16.dp))
 
             Button(
                 onClick = {
-                    isLoading = true
-                    response = ""
-                    fetchOllamaResponse(prompt) { result ->
-                        response = result
-                        isLoading = false
+                    if (discoveredHost != null && discoveredPort != null) {
+                        isLoading = true
+                        response = ""
+                        lastError = null
+                        fetchOllamaResponse(
+                            prompt,
+                            discoveredHost!!,
+                            discoveredPort!!,
+                        ) { result ->
+                            if (result.startsWith("Error:")) {
+                                lastError = result
+                            } else {
+                                response = result
+                            }
+                            isLoading = false
+                        }
                     }
                 },
-                enabled = prompt.isNotBlank(),
+                enabled = prompt.isNotBlank() && connectionStatus == ConnectionStatus.CONNECTED,
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Text("Send")
@@ -152,6 +281,12 @@ fun AppContent() {
 
             if (isLoading) {
                 CircularProgressIndicator()
+            } else if (lastError != null) {
+                Text(
+                    text = lastError!!,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.fillMaxWidth()
+                )
             } else {
                 Text(
                     text = response,
@@ -162,11 +297,11 @@ fun AppContent() {
     }
 }
 
-fun fetchOllamaResponse(prompt: String, onResult: (String) -> Unit) {
+fun fetchOllamaResponse(prompt: String, host: String, port: Int, onResult: (String) -> Unit) {
     CoroutineScope(Dispatchers.IO).launch {
         try {
             val request = buildJsonObject {
-                put("model", "gemma3") // Change model if needed
+                put("model", "gemma3")
                 putJsonArray("messages") {
                     addJsonObject {
                         put("role", "user")
@@ -174,7 +309,8 @@ fun fetchOllamaResponse(prompt: String, onResult: (String) -> Unit) {
                     }
                 }
             }
-            val response: HttpResponse = client.post("http://192.168.31.43:11434/api/chat") {
+            val url = "http://$host:$port/api/chat"
+            val response: HttpResponse = client.post(url) {
                 setBody(Json.encodeToString(JsonObject.serializer(), request))
                 headers.append("Content-Type", "application/json")
             }
@@ -196,4 +332,3 @@ fun fetchOllamaResponse(prompt: String, onResult: (String) -> Unit) {
         }
     }
 }
-
